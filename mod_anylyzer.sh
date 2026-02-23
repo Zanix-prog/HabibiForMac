@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/opt/homebrew/bin/bash
 
 # ==============================
 # Advanced Minecraft Mod Integrity Analyzer (macOS)
@@ -141,3 +141,4 @@ echo "=============================================="
 echo " Scan Complete."
 echo "=============================================="
 echo
+
