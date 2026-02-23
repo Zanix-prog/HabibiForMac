@@ -1,11 +1,8 @@
 #!/bin/bash
 
-# macOS Bash 3.2 Compatible
-# Minecraft Mod Integrity & Unknown Scanner
-
 clear
 echo "=========================================="
-echo " Minecraft Mod Integrity Analyzer (macOS)"
+echo " Minecraft Mod Integrity Scanner (Hash)"
 echo "=========================================="
 echo
 
@@ -14,9 +11,7 @@ DEFAULT_MODS="$HOME/Library/Application Support/minecraft/mods"
 echo -n "Enter path to mods folder (Press Enter for default): "
 read MODS
 
-if [ -z "$MODS" ]; then
-    MODS="$DEFAULT_MODS"
-fi
+[ -z "$MODS" ] && MODS="$DEFAULT_MODS"
 
 if [ ! -d "$MODS" ]; then
     echo "Invalid directory."
@@ -28,68 +23,39 @@ echo "Scanning:"
 echo "$MODS"
 echo
 
-# Minecraft uptime
-JAVA_PID=$(pgrep -f java)
-if [ ! -z "$JAVA_PID" ]; then
-    echo "{ Minecraft Uptime }"
-    ps -p $JAVA_PID -o pid,etime,command
-    echo
-fi
-
-TEMP_HASH_FILE="/tmp/mod_hashes.txt"
-> "$TEMP_HASH_FILE"
-
-VERIFIED_COUNT=0
-UNKNOWN_COUNT=0
-DUP_COUNT=0
-
-echo "Checking mods..."
-echo
+VERIFIED=0
+UNKNOWN=0
+SUSPECT=0
 
 for file in "$MODS"/*.jar; do
     [ -e "$file" ] || continue
 
-    FILENAME=$(basename "$file")
+    NAME=$(basename "$file")
     HASH=$(shasum -a 256 "$file" | awk '{print $1}')
 
-    # Duplicate detection
-    if grep -q "$HASH" "$TEMP_HASH_FILE"; then
-        echo "🔁 Duplicate detected: $FILENAME"
-        DUP_COUNT=$((DUP_COUNT+1))
-        continue
-    fi
+    echo "Checking: $NAME"
 
-    echo "$HASH" >> "$TEMP_HASH_FILE"
+    # --- Modrinth SHA256 Check ---
+    MR_RESPONSE=$(curl -s --max-time 10 \
+        "https://api.modrinth.com/v2/version_file/$HASH?algorithm=sha256")
 
-    RESPONSE=$(curl -s "https://api.modrinth.com/v2/version_file/$HASH?algorithm=sha256")
+    echo "$MR_RESPONSE" | grep -q "project_id"
 
-    echo "$RESPONSE" | grep -q "project_id"
     if [ $? -eq 0 ]; then
-        TITLE=$(echo "$RESPONSE" | sed -n 's/.*"project_id":"\([^"]*\)".*/\1/p')
-        echo "✔ Verified: $FILENAME"
-        VERIFIED_COUNT=$((VERIFIED_COUNT+1))
+        echo "  ✔ Verified on Modrinth"
+        VERIFIED=$((VERIFIED+1))
     else
-        echo "⚠ Unknown: $FILENAME"
-        UNKNOWN_COUNT=$((UNKNOWN_COUNT+1))
+        echo "  ⚠ Not found on Modrinth"
+        UNKNOWN=$((UNKNOWN+1))
     fi
 
-    # Metadata check
-    unzip -l "$file" | grep -q "fabric.mod.json"
-    if [ $? -eq 0 ]; then
-        echo "   ↳ Fabric metadata found"
-    else
-        unzip -l "$file" | grep -q "mods.toml"
-        if [ $? -eq 0 ]; then
-            echo "   ↳ Forge metadata found"
-        else
-            echo "   ↳ No standard metadata detected"
-        fi
-    fi
+    # --- Basic Suspicious String Scan ---
+    STRINGS=$(strings "$file" | grep -Ei \
+        "autoclick|aimbot|killaura|reach|velocity|triggerbot|crystal|esp|xray|packetspoof")
 
-    # Nested jars check
-    unzip -l "$file" | grep -q "META-INF/jars"
-    if [ $? -eq 0 ]; then
-        echo "   ↳ Contains nested jars"
+    if [ ! -z "$STRINGS" ]; then
+        echo "  🚨 Suspicious keywords detected"
+        SUSPECT=$((SUSPECT+1))
     fi
 
     echo
@@ -97,10 +63,8 @@ done
 
 echo "=========================================="
 echo "Scan Complete"
-echo "Verified: $VERIFIED_COUNT"
-echo "Unknown: $UNKNOWN_COUNT"
-echo "Duplicates: $DUP_COUNT"
+echo "Verified: $VERIFIED"
+echo "Unknown: $UNKNOWN"
+echo "Suspicious: $SUSPECT"
 echo "=========================================="
 echo
-
-rm -f "$TEMP_HASH_FILE"
