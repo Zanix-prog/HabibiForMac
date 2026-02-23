@@ -1,144 +1,106 @@
-#!/opt/homebrew/bin/bash
+#!/bin/bash
 
-# ==============================
-# Advanced Minecraft Mod Integrity Analyzer (macOS)
-# ==============================
-
-set -euo pipefail
+# macOS Bash 3.2 Compatible
+# Minecraft Mod Integrity & Unknown Scanner
 
 clear
-echo "=============================================="
-echo " Advanced Minecraft Mod Integrity Analyzer"
-echo " macOS Edition"
-echo "=============================================="
+echo "=========================================="
+echo " Minecraft Mod Integrity Analyzer (macOS)"
+echo "=========================================="
 echo
 
 DEFAULT_MODS="$HOME/Library/Application Support/minecraft/mods"
 
-read -r -p "Enter path to mods folder (Press Enter for default): " MODS
-if [[ -z "${MODS}" ]]; then
+echo -n "Enter path to mods folder (Press Enter for default): "
+read MODS
+
+if [ -z "$MODS" ]; then
     MODS="$DEFAULT_MODS"
 fi
 
-if [[ ! -d "$MODS" ]]; then
-    echo "❌ Invalid directory: $MODS"
-    exit 1
-fi
-
-if ! command -v jq &>/dev/null; then
-    echo "❌ jq is required. Install with: brew install jq"
+if [ ! -d "$MODS" ]; then
+    echo "Invalid directory."
     exit 1
 fi
 
 echo
-echo "📂 Scanning directory:"
+echo "Scanning:"
 echo "$MODS"
 echo
 
 # Minecraft uptime
-JAVA_PID=$(pgrep -f java || true)
-if [[ -n "${JAVA_PID}" ]]; then
+JAVA_PID=$(pgrep -f java)
+if [ ! -z "$JAVA_PID" ]; then
     echo "{ Minecraft Uptime }"
-    ps -p "$JAVA_PID" -o pid,etime,command
+    ps -p $JAVA_PID -o pid,etime,command
     echo
 fi
 
-TEMP_DIR=$(mktemp -d)
-trap 'rm -rf "$TEMP_DIR"' EXIT
+TEMP_HASH_FILE="/tmp/mod_hashes.txt"
+> "$TEMP_HASH_FILE"
 
-declare -A HASH_MAP
-declare -a VERIFIED
-declare -a UNKNOWN
-declare -a DUPLICATES
+VERIFIED_COUNT=0
+UNKNOWN_COUNT=0
+DUP_COUNT=0
 
-scan_file() {
-    local file="$1"
-    local filename
-    filename=$(basename "$file")
-
-    HASH=$(shasum -a 256 "$file" | awk '{print $1}')
-
-    # Duplicate detection
-    if [[ -n "${HASH_MAP[$HASH]:-}" ]]; then
-        DUPLICATES+=("$filename == ${HASH_MAP[$HASH]}")
-        return
-    fi
-    HASH_MAP[$HASH]="$filename"
-
-    RESPONSE=$(curl -s "https://api.modrinth.com/v2/version_file/$HASH?algorithm=sha256" || true)
-
-    if echo "$RESPONSE" | jq -e '.project_id' &>/dev/null; then
-        PROJECT_ID=$(echo "$RESPONSE" | jq -r '.project_id')
-        PROJECT_DATA=$(curl -s "https://api.modrinth.com/v2/project/$PROJECT_ID")
-        TITLE=$(echo "$PROJECT_DATA" | jq -r '.title')
-        VERIFIED+=("$TITLE ($filename)")
-    else
-        UNKNOWN+=("$filename")
-    fi
-}
-
-echo "⚡ Hashing & verifying mods..."
-echo
-
-# Parallel scan
-export -f scan_file
-export TEMP_DIR
-
-find "$MODS" -type f -name "*.jar" | while read -r file; do
-    scan_file "$file"
-done
-
-echo
-echo "=============================================="
-
-if [[ ${#VERIFIED[@]} -gt 0 ]]; then
-    echo
-    echo "✅ Verified Mods:"
-    for mod in "${VERIFIED[@]}"; do
-        echo "  ✔ $mod"
-    done
-fi
-
-if [[ ${#UNKNOWN[@]} -gt 0 ]]; then
-    echo
-    echo "⚠ Unknown Mods:"
-    for mod in "${UNKNOWN[@]}"; do
-        echo "  ⚠ $mod"
-    done
-fi
-
-if [[ ${#DUPLICATES[@]} -gt 0 ]]; then
-    echo
-    echo "🔁 Duplicate Mods:"
-    for mod in "${DUPLICATES[@]}"; do
-        echo "  🔁 $mod"
-    done
-fi
-
-echo
-echo "🔎 Metadata Validation:"
+echo "Checking mods..."
 echo
 
 for file in "$MODS"/*.jar; do
-    [[ -e "$file" ]] || continue
-    filename=$(basename "$file")
+    [ -e "$file" ] || continue
 
-    if unzip -l "$file" | grep -q "fabric.mod.json"; then
-        echo "  📦 $filename → Fabric mod detected"
-    elif unzip -l "$file" | grep -q "mods.toml"; then
-        echo "  📦 $filename → Forge mod detected"
-    else
-        echo "  ❓ $filename → No standard mod metadata found"
+    FILENAME=$(basename "$file")
+    HASH=$(shasum -a 256 "$file" | awk '{print $1}')
+
+    # Duplicate detection
+    if grep -q "$HASH" "$TEMP_HASH_FILE"; then
+        echo "🔁 Duplicate detected: $FILENAME"
+        DUP_COUNT=$((DUP_COUNT+1))
+        continue
     fi
 
-    # Nested jar scan
-    unzip -l "$file" | grep "META-INF/jars" >/dev/null 2>&1 && \
-        echo "     ↳ Contains nested jars"
+    echo "$HASH" >> "$TEMP_HASH_FILE"
+
+    RESPONSE=$(curl -s "https://api.modrinth.com/v2/version_file/$HASH?algorithm=sha256")
+
+    echo "$RESPONSE" | grep -q "project_id"
+    if [ $? -eq 0 ]; then
+        TITLE=$(echo "$RESPONSE" | sed -n 's/.*"project_id":"\([^"]*\)".*/\1/p')
+        echo "✔ Verified: $FILENAME"
+        VERIFIED_COUNT=$((VERIFIED_COUNT+1))
+    else
+        echo "⚠ Unknown: $FILENAME"
+        UNKNOWN_COUNT=$((UNKNOWN_COUNT+1))
+    fi
+
+    # Metadata check
+    unzip -l "$file" | grep -q "fabric.mod.json"
+    if [ $? -eq 0 ]; then
+        echo "   ↳ Fabric metadata found"
+    else
+        unzip -l "$file" | grep -q "mods.toml"
+        if [ $? -eq 0 ]; then
+            echo "   ↳ Forge metadata found"
+        else
+            echo "   ↳ No standard metadata detected"
+        fi
+    fi
+
+    # Nested jars check
+    unzip -l "$file" | grep -q "META-INF/jars"
+    if [ $? -eq 0 ]; then
+        echo "   ↳ Contains nested jars"
+    fi
+
+    echo
 done
 
-echo
-echo "=============================================="
-echo " Scan Complete."
-echo "=============================================="
+echo "=========================================="
+echo "Scan Complete"
+echo "Verified: $VERIFIED_COUNT"
+echo "Unknown: $UNKNOWN_COUNT"
+echo "Duplicates: $DUP_COUNT"
+echo "=========================================="
 echo
 
+rm -f "$TEMP_HASH_FILE"
