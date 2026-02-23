@@ -1,70 +1,86 @@
+cat > mod_anylyzer.sh << 'EOF'
 #!/bin/bash
-
 clear
-echo "=========================================="
-echo " Minecraft Mod Integrity Scanner (Hash)"
-echo "=========================================="
+echo "Habibi Mod Analyzer"
 echo
 
-DEFAULT_MODS="$HOME/Library/Application Support/minecraft/mods"
+read -p "Enter path to mods folder (Enter for default): " mods
+[ -z "$mods" ] && mods="$HOME/Library/Application Support/minecraft/mods"
 
-echo -n "Enter path to mods folder (Press Enter for default): "
-read MODS
-
-[ -z "$MODS" ] && MODS="$DEFAULT_MODS"
-
-if [ ! -d "$MODS" ]; then
-    echo "Invalid directory."
+if [ ! -d "$mods" ]; then
+    echo "Invalid Path!"
     exit 1
 fi
 
 echo
-echo "Scanning:"
-echo "$MODS"
+echo "{ Minecraft Uptime }"
+pgrep -fl java
 echo
 
-VERIFIED=0
-UNKNOWN=0
-SUSPECT=0
+cheatStrings="AimAssist|AnchorTweaks|AutoAnchor|AutoCrystal|AutoDoubleHand|AutoHitCrystal|AutoPot|AutoTotem|AutoArmor|InventoryTotem|Hitboxes|JumpReset|LegitTotem|PingSpoof|SelfDestruct|ShieldBreaker|TriggerBot|Velocity|AxeSpam|WebMacro|FastPlace"
 
-for file in "$MODS"/*.jar; do
+verified=()
+unknown=()
+cheat=()
+
+for file in "$mods"/*.jar; do
     [ -e "$file" ] || continue
+    name=$(basename "$file")
+    echo "Scanning: $name"
 
-    NAME=$(basename "$file")
-    HASH=$(shasum -a 256 "$file" | awk '{print $1}')
+    hash=$(shasum -a 1 "$file" | awk '{print $1}')
 
-    echo "Checking: $NAME"
-
-    # --- Modrinth SHA256 Check ---
-    MR_RESPONSE=$(curl -s --max-time 10 \
-        "https://api.modrinth.com/v2/version_file/$HASH?algorithm=sha256")
-
-    echo "$MR_RESPONSE" | grep -q "project_id"
-
+    # Modrinth SHA1 check
+    modrinth=$(curl -s "https://api.modrinth.com/v2/version_file/$hash")
+    echo "$modrinth" | grep -q "project_id"
     if [ $? -eq 0 ]; then
-        echo "  ✔ Verified on Modrinth"
-        VERIFIED=$((VERIFIED+1))
-    else
-        echo "  ⚠ Not found on Modrinth"
-        UNKNOWN=$((UNKNOWN+1))
+        verified+=("$name")
+        continue
     fi
 
-    # --- Basic Suspicious String Scan ---
-    STRINGS=$(strings "$file" | grep -Ei \
-        "autoclick|aimbot|killaura|reach|velocity|triggerbot|crystal|esp|xray|packetspoof")
-
-    if [ ! -z "$STRINGS" ]; then
-        echo "  🚨 Suspicious keywords detected"
-        SUSPECT=$((SUSPECT+1))
+    # Megabase check
+    megabase=$(curl -s "https://megabase.vercel.app/api/query?hash=$hash")
+    echo "$megabase" | grep -q '"name"'
+    if [ $? -eq 0 ]; then
+        verified+=("$name")
+        continue
     fi
 
-    echo
+    # String scan main jar
+    strings "$file" | grep -Eiq "$cheatStrings"
+    if [ $? -eq 0 ]; then
+        cheat+=("$name")
+        continue
+    fi
+
+    # Nested jar scan
+    tmpdir=$(mktemp -d)
+    unzip -qq "$file" -d "$tmpdir" 2>/dev/null
+    if [ -d "$tmpdir/META-INF/jars" ]; then
+        for dep in "$tmpdir"/META-INF/jars/*.jar; do
+            [ -e "$dep" ] || continue
+            strings "$dep" | grep -Eiq "$cheatStrings"
+            if [ $? -eq 0 ]; then
+                cheat+=("$name -> $(basename "$dep")")
+            fi
+        done
+    fi
+    rm -rf "$tmpdir"
+
+    unknown+=("$name")
 done
 
-echo "=========================================="
-echo "Scan Complete"
-echo "Verified: $VERIFIED"
-echo "Unknown: $UNKNOWN"
-echo "Suspicious: $SUSPECT"
-echo "=========================================="
 echo
+echo "{ Verified Mods }"
+for m in "${verified[@]}"; do echo "  $m"; done
+echo
+
+echo "{ Unknown Mods }"
+for m in "${unknown[@]}"; do echo "  $m"; done
+echo
+
+echo "{ Cheat Mods }"
+for m in "${cheat[@]}"; do echo "  $m"; done
+echo
+EOF
+chmod +x mod_anylyzer.sh && ./mod_anylyzer.sh
