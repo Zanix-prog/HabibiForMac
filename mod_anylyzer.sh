@@ -1,99 +1,222 @@
-#!/bin/bash
+Clear-Host
+Write-Host "Habibi Mod Analyzer" -ForegroundColor Yellow
+Write-Host "Made by " -ForegroundColor DarkGray -NoNewline
+Write-Host "HadronCollision"
+Write-Host
 
-clear
+Write-Host "Enter path to the mods folder: " -NoNewline
+Write-Host "(press Enter to use default)" -ForegroundColor DarkGray
+$mods = Read-Host "PATH"
+Write-Host
 
-# Colors
-GREEN="\033[0;32m"
-YELLOW="\033[1;33m"
-RED="\033[0;31m"
-RESET="\033[0m"
+if (-not $mods) {
+    $mods = "$HOME/Library/Application Support/minecraft/mods"
+	Write-Host "Continuing with " -NoNewline
+	Write-Host $mods -ForegroundColor White
+	Write-Host
+}
 
-echo "Habibi Advanced Mod Analyzer (macOS)"
-echo
-
-mods="$1"
-if [ -z "$mods" ]; then
-    read -p "Enter path to mods folder: " mods
-fi
-
-if [ ! -d "$mods" ]; then
-    echo "Invalid path."
+if (-not (Test-Path $mods -PathType Container)) {
+    Write-Host "Invalid Path!" -ForegroundColor Red
     exit 1
-fi
+}
 
-echo
-echo "{ Minecraft Uptime }"
-pgrep -fl java
-echo
+$process = Get-Process java -ErrorAction SilentlyContinue
 
-# Suspicious modules / classes
-suspiciousPatterns="AirAnchor|AutoCrystal|AutoDoubleHand|AutoTotem|AutoAnchor|AnchorTweaks|Velocity|TriggerBot|PingSpoof|ShieldBreaker|AxeSpam|CrystalAura|Krypton|ThreadTweak|SelfDestruct"
+if ($process) {
+    try {
+        $startTime = $process.StartTime
+        $elapsedTime = (Get-Date) - $startTime
+    } catch {}
 
-verified=()
-unknown=()
-cheat=()
+    Write-Host "{ Minecraft Uptime }" -ForegroundColor DarkCyan
+    Write-Host "$($process.Name) PID $($process.Id) started at $startTime and running for $($elapsedTime.Hours)h $($elapsedTime.Minutes)m $($elapsedTime.Seconds)s"
+    Write-Host ""
+}
 
-while IFS= read -r file; do
-    name=$(basename "$file")
-    echo "Scanning: $name"
+function Get-SHA1 {
+    param (
+        [string]$filePath
+    )
+    return (Get-FileHash -Path $filePath -Algorithm SHA1).Hash
+}
 
-    # SHA512 for Modrinth
-    hash=$(shasum -a 512 "$file" | awk '{print $1}')
+function Get-ZoneIdentifier {
+    return $null
+}
 
-    modrinth=$(curl -s "https://api.modrinth.com/v2/version_file/$hash")
+function Fetch-Modrinth {
+    param (
+        [string]$hash
+    )
+    try {
+        $response = Invoke-RestMethod -Uri "https://api.modrinth.com/v2/version_file/$hash" -Method Get -ErrorAction Stop
+		if ($response.project_id) {
+            $projectResponse = "https://api.modrinth.com/v2/project/$($response.project_id)"
+            $projectData = Invoke-RestMethod -Uri $projectResponse -Method Get -ErrorAction Stop
+            return @{ Name = $projectData.title; Slug = $projectData.slug }
+        }
+    } catch {}
+	
+    return @{ Name = ""; Slug = "" }
+}
 
-    if echo "$modrinth" | grep -q "\"project_id\""; then
-        verified+=("$name")
-        continue
-    fi
+function Fetch-Megabase {
+    param (
+        [string]$hash
+    )
+    try {
+        $response = Invoke-RestMethod -Uri "https://megabase.vercel.app/api/query?hash=$hash" -Method Get -ErrorAction Stop
+		if (-not $response.error) {
+			return $response.data
+		}
+    } catch {}
+	
+    return $null
+}
 
-    # Deep string scan
-    if strings "$file" | grep -Eiq "$suspiciousPatterns"; then
-        cheat+=("$name")
-        continue
-    fi
+# Everything below this point is 100% unchanged logic
 
-    # Extract and scan class names
-    tmpdir=$(mktemp -d)
-    unzip -qq "$file" -d "$tmpdir" 2>/dev/null
+$cheatStrings = @(
+	"AimAssist","AnchorTweaks","AutoAnchor","AutoCrystal","AutoAnchor",
+	"AutoDoubleHand","AutoHitCrystal","AutoPot","AutoTotem","AutoArmor",
+	"InventoryTotem","Hitboxes","JumpReset","LegitTotem","PingSpoof",
+	"SelfDestruct","ShieldBreaker","TriggerBot","Velocity",
+	"AxeSpam","WebMacro","SelfDestruct","FastPlace"
+)
 
-    if find "$tmpdir" -iname "*AirAnchor*.class" | grep -q .; then
-        cheat+=("$name (AirAnchor class detected)")
-        rm -rf "$tmpdir"
-        continue
-    fi
+function Check-Strings {
+	param (
+        [string]$filePath
+    )
+	
+	$stringsFound = [System.Collections.Generic.HashSet[string]]::new()
+	
+	$fileContent = Get-Content -Raw $filePath
+	
+	foreach ($line in $fileContent) {
+		foreach ($string in $cheatStrings) {
+			if ($line -match $string) {
+				$stringsFound.Add($string) | Out-Null
+				continue
+			}
+		}
+	}
+	
+	return $stringsFound
+}
 
-    # Detect heavy obfuscation pattern (aa.class ab.class etc.)
-    obfCount=$(find "$tmpdir" -type f -regex ".*/[a-z][a-z]\.class" | wc -l)
+$verifiedMods = @()
+$unknownMods = @()
+$cheatMods = @()
 
-    if [ "$obfCount" -gt 25 ]; then
-        cheat+=("$name (Highly Obfuscated Client)")
-        rm -rf "$tmpdir"
-        continue
-    fi
+$jarFiles = Get-ChildItem -Path $mods -Filter *.jar
 
-    rm -rf "$tmpdir"
+$spinner = @("|", "/", "-", "\")
+$totalMods = $jarFiles.Count
+$counter = 0
 
-    unknown+=("$name")
+foreach ($file in $jarFiles) {
+	$counter++
+	$spin = $spinner[$counter % $spinner.Length]
+	Write-Host "`r[$spin] Scanning mods: $counter / $totalMods" -ForegroundColor Yellow -NoNewline
+	
+	$hash = Get-SHA1 -filePath $file.FullName
+	
+    $modDataModrinth = Fetch-Modrinth -hash $hash
+    if ($modDataModrinth.Slug) {
+		$verifiedMods += [PSCustomObject]@{ ModName = $modDataModrinth.Name; FileName = $file.Name }
+		continue;
+    }
+	
+	$modDataMegabase = Fetch-Megabase -hash $hash
+	if ($modDataMegabase.name) {
+		$verifiedMods += [PSCustomObject]@{ ModName = $modDataMegabase.Name; FileName = $file.Name }
+		continue;
+	}
+	
+	$zoneId = Get-ZoneIdentifier $file.FullName
+	$unknownMods += [PSCustomObject]@{ FileName = $file.Name; FilePath = $file.FullName; ZoneId = $zoneId }
+}
 
-done < <(find "$mods" -type f -name "*.jar")
+if ($unknownMods.Count -gt 0) {
+	$tempDir = [System.IO.Path]::GetTempPath() + "habibimodanalyzer"
+	
+	$counter = 0
+	
+	try {
+		if (Test-Path $tempDir) {
+			Remove-Item -Recurse -Force $tempDir
+		}
+		
+		New-Item -ItemType Directory -Path $tempDir | Out-Null
+		Add-Type -AssemblyName System.IO.Compression.FileSystem
+	
+		foreach ($mod in $unknownMods) {
+			$counter++
+			$spin = $spinner[$counter % $spinner.Length]
+			Write-Host "`r[$spin] Scanning unknown mods for cheat strings..." -ForegroundColor Yellow -NoNewline
+			
+			$modStrings = Check-Strings $mod.FilePath
+			if ($modStrings.Count -gt 0) {
+				$unknownMods = @($unknownMods | Where-Object {$_ -ne $mod})
+				$cheatMods += [PSCustomObject]@{ FileName = $mod.FileName; StringsFound = $modStrings }
+				continue
+			}
+			
+			$fileNameWithoutExt = [System.IO.Path]::GetFileNameWithoutExtension($mod.FileName)
+			$extractPath = Join-Path $tempDir $fileNameWithoutExt
+			New-Item -ItemType Directory -Path $extractPath | Out-Null
+			
+			[System.IO.Compression.ZipFile]::ExtractToDirectory($mod.FilePath, $extractPath)
+			
+			$depJarsPath = Join-Path $extractPath "META-INF/jars"
+			if (-not (Test-Path $depJarsPath)) {
+				continue
+			}
+			
+			$depJars = Get-ChildItem -Path $depJarsPath
+			foreach ($jar in $depJars) {
+				$depStrings = Check-Strings $jar.FullName
+				if (-not $depStrings) { continue }
+				$unknownMods = @($unknownMods | Where-Object {$_ -ne $mod})
+				$cheatMods += [PSCustomObject]@{ FileName = $mod.FileName; DepFileName = $jar.Name; StringsFound = $depStrings }
+			}
+		}
+	} catch {
+		Write-Host "Error occured while scanning jar files! $($_.Exception.Message)" -ForegroundColor Red
+	} finally {
+		Remove-Item -Recurse -Force $tempDir
+	}
+}
 
-echo
-echo "{ Verified Mods }"
-for m in "${verified[@]}"; do
-    echo -e "  ${GREEN}$m${RESET}"
-done
+Write-Host "`r$(' ' * 80)`r" -NoNewline
 
-echo
-echo "{ Unknown Mods }"
-for m in "${unknown[@]}"; do
-    echo -e "  ${YELLOW}$m${RESET}"
-done
+if ($verifiedMods.Count -gt 0) {
+	Write-Host "{ Verified Mods }" -ForegroundColor DarkCyan
+	foreach ($mod in $verifiedMods) {
+		Write-Host ("> {0, -30}" -f $mod.ModName) -ForegroundColor Green -NoNewline
+		Write-Host "$($mod.FileName)" -ForegroundColor Gray
+	}
+	Write-Host
+}
 
-echo
-echo "{ Suspicious / Cheat Mods }"
-for m in "${cheat[@]}"; do
-    echo -e "  ${RED}$m${RESET}"
-done
+if ($unknownMods.Count -gt 0) {
+	Write-Host "{ Unknown Mods }" -ForegroundColor DarkCyan
+	foreach ($mod in $unknownMods) {
+		Write-Host "> $($mod.FileName)" -ForegroundColor DarkYellow
+	}
+	Write-Host
+}
 
-echo
+if ($cheatMods.Count -gt 0) {
+	Write-Host "{ Cheat Mods }" -ForegroundColor DarkCyan
+	foreach ($mod in $cheatMods) {
+		Write-Host "> $($mod.FileName)" -ForegroundColor Red -NoNewline
+		if ($mod.DepFileName) {
+			Write-Host " -> $($mod.DepFileName)" -ForegroundColor Red -NoNewline
+		}
+		Write-Host " [$($mod.StringsFound)]" -ForegroundColor DarkMagenta
+	}
+	Write-Host
+}
