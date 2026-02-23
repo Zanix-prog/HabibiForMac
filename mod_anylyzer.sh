@@ -28,7 +28,7 @@ for file in "$mods"/*.jar; do
     name=$(basename "$file")
     echo "Scanning: $name"
 
-    hash=$(shasum -a 1 "$file" | awk '{print $1}')
+    hash=$(shasum -a 512 "$file" | awk '{print $1}')
 
     # Modrinth SHA1 check
     modrinth=$(curl -s "https://api.modrinth.com/v2/version_file/$hash")
@@ -84,3 +84,4 @@ for m in "${cheat[@]}"; do echo "  $m"; done
 echo
 EOF
 chmod +x mod_anylyzer.sh && ./mod_anylyzer.sh
+
